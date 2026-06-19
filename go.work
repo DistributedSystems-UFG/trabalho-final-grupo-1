@@ -1,8 +1,0 @@
-go 1.25.0
-
-use (
-	./go/cli
-	./go/collab-service
-	./go/doc-service
-	./go/gateway
-)
