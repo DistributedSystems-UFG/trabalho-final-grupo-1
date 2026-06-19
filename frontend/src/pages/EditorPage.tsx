@@ -48,16 +48,19 @@ export default function EditorPage() {
   const handleMessage = useCallback((msg: ServerMsg) => {
     switch (msg.type) {
       case 'resync':
-        setContent(msg.content)
+        setContent(msg.content ?? '')
         break
 
       case 'op': {
+        if (!msg.op) { console.warn('[editor] op message missing op field', msg); break }
         const ta = textareaRef.current
         const savedStart = ta?.selectionStart ?? 0
         const savedEnd = ta?.selectionEnd ?? 0
+        console.debug('[editor] remote op received', msg.op)
 
         setContent(prev => {
-          const next = applyOp(prev, msg.op)
+          const next = applyOp(prev, msg.op!)
+          console.debug('[editor] content after remote op:', JSON.stringify(next))
           // Adjust cursor position to account for the remote op
           if (ta) {
             const newStart = adjustCursor(savedStart, msg.op)
@@ -73,7 +76,7 @@ export default function EditorPage() {
       }
 
       case 'presence':
-        setUsers(msg.users.filter(u => u.id !== myId))
+        setUsers((msg.users ?? []).filter(u => u.id !== myId))
         break
     }
   }, [myId])
@@ -155,7 +158,7 @@ export default function EditorPage() {
 // ── Helpers ───────────────────────────────────────────────
 
 function applyOp(content: string, op: Op): string {
-  const chars = [...content]
+  const chars = [...(content ?? '')]
   const pos = Math.max(0, Math.min(op.pos, chars.length))
   if (op.type === 'insert' && op.char) {
     chars.splice(pos, 0, op.char)
@@ -175,16 +178,16 @@ function adjustCursor(cursor: number, op: Op): number {
 // Handles typing (1 char), paste (N chars) and deletion (1 or more chars).
 function diffToOps(oldStr: string, newStr: string): Op[] {
   const ops: Op[] = []
+  const old = oldStr ?? ''
+  const next = newStr ?? ''
 
-  // Find common prefix
   let i = 0
-  const minLen = Math.min(oldStr.length, newStr.length)
-  while (i < minLen && oldStr[i] === newStr[i]) i++
+  const minLen = Math.min(old.length, next.length)
+  while (i < minLen && old[i] === next[i]) i++
 
-  // Find common suffix (from end, not overlapping prefix)
-  let oi = oldStr.length - 1
-  let ni = newStr.length - 1
-  while (oi >= i && ni >= i && oldStr[oi] === newStr[ni]) { oi--; ni-- }
+  let oi = old.length - 1
+  let ni = next.length - 1
+  while (oi >= i && ni >= i && old[oi] === next[ni]) { oi--; ni-- }
 
   // Delete chars old[i..oi] — iterate in reverse so positions stay valid
   for (let k = oi; k >= i; k--) {
@@ -193,8 +196,7 @@ function diffToOps(oldStr: string, newStr: string): Op[] {
 
   // Insert chars new[i..ni]
   for (let k = i; k <= ni; k++) {
-    // After each insert the position advances by 1 for subsequent inserts
-    ops.push({ type: 'insert', pos: k, char: newStr[k] })
+    ops.push({ type: 'insert', pos: k, char: next[k] })
   }
 
   return ops

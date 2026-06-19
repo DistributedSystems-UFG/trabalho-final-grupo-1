@@ -36,6 +36,7 @@ export function useWebSocket(docId: string, options: Options) {
     ws.onmessage = ({ data }) => {
       try {
         const msg: ServerMsg = JSON.parse(data)
+        console.debug('[ws] recv', msg.type, msg)
         if (msg.type === 'resync' || msg.type === 'op') {
           versionRef.current = msg.serverVersion
         }
@@ -58,6 +59,7 @@ export function useWebSocket(docId: string, options: Options) {
         clientVersion: versionRef.current,
         op,
       }))
+      versionRef.current++  // local version advances; server will confirm via others' ops
     }
   }, [])
 

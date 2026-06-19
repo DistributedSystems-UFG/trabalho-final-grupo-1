@@ -18,8 +18,9 @@ export default function Sidebar({ onDocumentsChange }: Props) {
 
   useEffect(() => {
     api.listDocuments().then(d => {
-      setDocs(d)
-      onDocumentsChange?.(d)
+      const list = d ?? []
+      setDocs(list)
+      onDocumentsChange?.(list)
     })
   }, [])
 
