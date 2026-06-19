@@ -1,13 +1,13 @@
-FROM golang:1.25-alpine AS builder
+FROM golang:1.22-alpine AS builder
 WORKDIR /app
-COPY go.mod go.sum* ./
+COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -o /collab-service ./cmd/main.go
+RUN CGO_ENABLED=0 go build -o collab-service ./cmd
 
-FROM alpine:3.19
-RUN apk --no-cache add ca-certificates tzdata
+FROM alpine:3.20
+RUN apk add --no-cache ca-certificates
 WORKDIR /app
-COPY --from=builder /collab-service ./collab-service
-EXPOSE 50052
+COPY --from=builder /app/collab-service .
+EXPOSE 8080
 CMD ["./collab-service"]
