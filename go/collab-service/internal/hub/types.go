@@ -12,20 +12,18 @@ type ClientMessage struct {
 	Type          string `json:"type"`          // "op" | "cursor"
 	ClientVersion int    `json:"clientVersion"`
 	Op            *Op    `json:"op,omitempty"`
-	Line          int    `json:"line,omitempty"`
-	Col           int    `json:"col,omitempty"`
+	Pos           int    `json:"pos,omitempty"` // absolute character offset (cursor events)
 }
 
 // ServerMessage is sent to WebSocket clients.
 type ServerMessage struct {
-	Type          string        `json:"type"`
-	ServerVersion int           `json:"serverVersion,omitempty"`
-	UserID        string        `json:"userId,omitempty"`
-	Name          string        `json:"name,omitempty"`
-	Op            *Op           `json:"op,omitempty"`
-	Content       string        `json:"content"`
-	Line          int           `json:"line,omitempty"`
-	Col           int           `json:"col,omitempty"`
+	Type          string         `json:"type"`
+	ServerVersion int            `json:"serverVersion,omitempty"`
+	UserID        string         `json:"userId,omitempty"`
+	Name          string         `json:"name,omitempty"`
+	Op            *Op            `json:"op,omitempty"`
+	Content       string         `json:"content,omitempty"`
+	Pos           int            `json:"pos,omitempty"` // absolute character offset (cursor events)
 	Users         []PresenceUser `json:"users,omitempty"`
 }
 

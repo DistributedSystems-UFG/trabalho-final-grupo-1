@@ -13,12 +13,13 @@ type incomingMsg struct {
 }
 
 // Hub is an actor goroutine that serialises all state mutations for one document.
-// It is the only writer of content and version — no mutex needed for these fields.
+// It is the only writer of content, version and ops — no mutex needed for these fields.
 type Hub struct {
 	docID      string
 	clients    map[*Client]bool
 	content    string
 	version    int
+	ops        []Op // ops[i] was applied to produce version i+1; needed for OT transforms
 	register   chan *Client
 	unregister chan *Client
 	incoming   chan incomingMsg
@@ -30,6 +31,7 @@ func newHub(docID, content string, pub *mq.Publisher) *Hub {
 		docID:      docID,
 		clients:    make(map[*Client]bool),
 		content:    content,
+		ops:        make([]Op, 0, 64),
 		register:   make(chan *Client, 16),
 		unregister: make(chan *Client, 16),
 		incoming:   make(chan incomingMsg, 256),
@@ -79,25 +81,35 @@ func (h *Hub) handleOp(c *Client, env ClientMessage) {
 	if env.Op == nil {
 		return
 	}
-	op := transform(env.Op, h.version-env.ClientVersion)
-	h.content = apply(h.content, op)
-	h.version++
+	if env.ClientVersion < 0 || env.ClientVersion > h.version {
+		h.sendTo(c, ServerMessage{Type: "resync", ServerVersion: h.version, Content: h.content})
+		return
+	}
 
-	h.broadcastExcept(c, ServerMessage{
-		Type:          "op",
-		ServerVersion: h.version,
-		UserID:        c.userID,
-		Op:            op,
-	})
+	op := transformSince(env.Op, h.ops, env.ClientVersion)
 
-	go h.pub.PublishOp(mq.OpEvent{
-		DocID:     h.docID,
-		UserID:    c.userID,
-		Version:   h.version,
-		Type:      op.Type,
-		Pos:       op.Pos,
-		Character: op.Char,
-	})
+	if op != nil {
+		h.content = apply(h.content, op)
+		h.version++
+		h.ops = append(h.ops, *op)
+
+		h.broadcastExcept(c, ServerMessage{
+			Type:          "op",
+			ServerVersion: h.version,
+			UserID:        c.userID,
+			Op:            op,
+		})
+
+		eventType := "INSERT"
+		if op.Type == "delete" {
+			eventType = "DELETE"
+		}
+		snapshot := h.content
+		go h.pub.PublishDocEvent(mq.NewDocEvent(h.docID, c.userID, h.version, eventType, op.Pos, op.Char, snapshot))
+	}
+
+	// Ack tells the client which server version their op landed at (or was a no-op at).
+	h.sendTo(c, ServerMessage{Type: "ack", ServerVersion: h.version})
 }
 
 func (h *Hub) handleCursor(c *Client, env ClientMessage) {
@@ -105,8 +117,7 @@ func (h *Hub) handleCursor(c *Client, env ClientMessage) {
 		Type:   "cursor",
 		UserID: c.userID,
 		Name:   c.name,
-		Line:   env.Line,
-		Col:    env.Col,
+		Pos:    env.Pos,
 	})
 }
 

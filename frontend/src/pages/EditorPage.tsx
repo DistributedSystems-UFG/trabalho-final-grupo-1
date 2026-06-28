@@ -1,10 +1,12 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import Sidebar from '../components/Sidebar'
 import { useWebSocket, ServerMsg, Op } from '../hooks/useWebSocket'
 import { api, Metrics } from '../services/api'
 
 interface PresenceUser { id: string; name: string }
+
+interface RemoteCursor { pos: number; name: string }
 
 const COLORS = ['#e74c3c', '#3498db', '#9b59b6', '#f39c12', '#1abc9c', '#e67e22']
 
@@ -22,12 +24,11 @@ export default function EditorPage() {
   const [docTitle, setDocTitle] = useState('Carregando...')
   const [users, setUsers] = useState<PresenceUser[]>([])
   const [metrics, setMetrics] = useState<Metrics | null>(null)
+  const [cursors, setCursors] = useState<Map<string, RemoteCursor>>(new Map())
   const myId = localStorage.getItem('userId') ?? ''
 
-  // Keep contentRef in sync for use inside WS handler (avoids stale closures)
   useEffect(() => { contentRef.current = content }, [content])
 
-  // Load document title
   useEffect(() => {
     if (!docId) return
     api.listDocuments().then(docs => {
@@ -36,7 +37,6 @@ export default function EditorPage() {
     })
   }, [docId])
 
-  // Metrics polling (every 10s)
   useEffect(() => {
     if (!docId) return
     const load = () => api.getMetrics(docId).then(setMetrics).catch(() => {})
@@ -49,6 +49,7 @@ export default function EditorPage() {
     switch (msg.type) {
       case 'resync':
         setContent(msg.content ?? '')
+        setCursors(new Map())
         break
 
       case 'op': {
@@ -56,15 +57,12 @@ export default function EditorPage() {
         const ta = textareaRef.current
         const savedStart = ta?.selectionStart ?? 0
         const savedEnd = ta?.selectionEnd ?? 0
-        console.debug('[editor] remote op received', msg.op)
 
         setContent(prev => {
           const next = applyOp(prev, msg.op!)
-          console.debug('[editor] content after remote op:', JSON.stringify(next))
-          // Adjust cursor position to account for the remote op
           if (ta) {
-            const newStart = adjustCursor(savedStart, msg.op)
-            const newEnd = adjustCursor(savedEnd, msg.op)
+            const newStart = adjustCursor(savedStart, msg.op!)
+            const newEnd = adjustCursor(savedEnd, msg.op!)
             requestAnimationFrame(() => {
               ta.selectionStart = newStart
               ta.selectionEnd = newEnd
@@ -72,16 +70,42 @@ export default function EditorPage() {
           }
           return next
         })
+
+        // Adjust all remote cursor positions for the incoming op
+        setCursors(prev => {
+          const m = new Map(prev)
+          for (const [id, cur] of m) {
+            m.set(id, { ...cur, pos: adjustCursor(cur.pos, msg.op!) })
+          }
+          return m
+        })
         break
       }
 
+      case 'cursor':
+        setCursors(prev => {
+          const m = new Map(prev)
+          m.set(msg.userId, { pos: msg.pos, name: msg.name })
+          return m
+        })
+        break
+
       case 'presence':
         setUsers((msg.users ?? []).filter(u => u.id !== myId))
+        // Remove cursors for users who left
+        setCursors(prev => {
+          const active = new Set((msg.users ?? []).map(u => u.id))
+          const m = new Map(prev)
+          for (const id of m.keys()) {
+            if (!active.has(id)) m.delete(id)
+          }
+          return m
+        })
         break
     }
   }, [myId])
 
-  const { connected, sendOp } = useWebSocket(docId!, { onMessage: handleMessage })
+  const { connected, sendOp, sendCursor } = useWebSocket(docId!, { onMessage: handleMessage })
 
   function handleChange(e: React.ChangeEvent<HTMLTextAreaElement>) {
     const newVal = e.target.value
@@ -89,6 +113,11 @@ export default function EditorPage() {
     const ops = diffToOps(old, newVal)
     setContent(newVal)
     ops.forEach(op => sendOp(op))
+    sendCursor(e.target.selectionStart)
+  }
+
+  function handleCursorMove(e: React.SyntheticEvent<HTMLTextAreaElement>) {
+    sendCursor(e.currentTarget.selectionStart)
   }
 
   return (
@@ -96,7 +125,6 @@ export default function EditorPage() {
       <Sidebar />
 
       <div className="editor-area">
-        {/* Top bar: connection status + presence + metrics */}
         <div className="editor-topbar">
           {metrics && (
             <div className="metrics-badge">
@@ -128,26 +156,32 @@ export default function EditorPage() {
           </span>
         </div>
 
-        {/* Editor scroll area */}
         <div className="editor-scroll">
           <div className="editor-page">
-            <h1
-              className="editor-title"
-              style={{ cursor: 'default' }}
-            >
+            <h1 className="editor-title" style={{ cursor: 'default' }}>
               {docTitle}
             </h1>
 
             <div className="editor-divider" />
 
-            <textarea
-              ref={textareaRef}
-              className="editor-body"
-              value={content}
-              onChange={handleChange}
-              placeholder="Pressione Enter e comece a escrever…"
-              autoFocus
-            />
+            {/* Wrapper for cursor overlay */}
+            <div style={{ position: 'relative' }}>
+              <textarea
+                ref={textareaRef}
+                className="editor-body"
+                value={content}
+                onChange={handleChange}
+                onClick={handleCursorMove}
+                onKeyUp={handleCursorMove}
+                placeholder="Pressione Enter e comece a escrever…"
+                autoFocus
+              />
+              <CursorOverlay
+                taRef={textareaRef}
+                cursors={cursors}
+                content={content}
+              />
+            </div>
           </div>
         </div>
       </div>
@@ -155,7 +189,158 @@ export default function EditorPage() {
   )
 }
 
-// ── Helpers ───────────────────────────────────────────────
+// ── Cursor overlay ─────────────────────────────────────────────────────────────
+
+interface CursorOverlayProps {
+  taRef: React.RefObject<HTMLTextAreaElement>
+  cursors: Map<string, RemoteCursor>
+  content: string
+}
+
+interface ComputedCursor {
+  id: string
+  top: number
+  left: number
+  name: string
+  color: string
+}
+
+function CursorOverlay({ taRef, cursors, content }: CursorOverlayProps) {
+  const [positions, setPositions] = useState<ComputedCursor[]>([])
+
+  useLayoutEffect(() => {
+    const ta = taRef.current
+    if (!ta || cursors.size === 0) { setPositions([]); return }
+
+    const computed = [...cursors.entries()].flatMap(([id, cursor]) => {
+      try {
+        const coords = getCaretCoords(ta, cursor.pos)
+        return [{ id, ...coords, name: cursor.name, color: avatarColor(id) }]
+      } catch {
+        return []
+      }
+    })
+    setPositions(computed)
+  }, [cursors, content, taRef])
+
+  // Recompute on scroll so cursors track the visible area
+  useEffect(() => {
+    const ta = taRef.current
+    if (!ta) return
+    const onScroll = () => {
+      const computed = [...cursors.entries()].flatMap(([id, cursor]) => {
+        try {
+          const coords = getCaretCoords(ta, cursor.pos)
+          return [{ id, ...coords, name: cursor.name, color: avatarColor(id) }]
+        } catch {
+          return []
+        }
+      })
+      setPositions(computed)
+    }
+    ta.addEventListener('scroll', onScroll)
+    return () => ta.removeEventListener('scroll', onScroll)
+  }, [cursors, taRef])
+
+  if (positions.length === 0) return null
+
+  return (
+    <div style={{
+      position: 'absolute',
+      inset: 0,
+      pointerEvents: 'none',
+      overflow: 'hidden',
+    }}>
+      {positions.map(p => (
+        <div
+          key={p.id}
+          style={{
+            position: 'absolute',
+            top: p.top,
+            left: p.left,
+            lineHeight: 0,
+          }}
+        >
+          {/* Cursor caret line */}
+          <div style={{
+            width: 2,
+            height: '1.2em',
+            background: p.color,
+            borderRadius: 1,
+            animation: 'collab-blink 1.2s step-end infinite',
+          }} />
+          {/* Name label above the caret */}
+          <div style={{
+            position: 'absolute',
+            bottom: '1.2em',
+            left: 0,
+            background: p.color,
+            color: '#fff',
+            fontSize: 11,
+            fontFamily: 'system-ui, sans-serif',
+            fontWeight: 600,
+            padding: '2px 5px',
+            borderRadius: '3px 3px 3px 0',
+            whiteSpace: 'nowrap',
+            lineHeight: 1.4,
+            userSelect: 'none',
+          }}>
+            {p.name}
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+// ── Mirror technique: calculate pixel position of a character offset ──────────
+
+function getCaretCoords(ta: HTMLTextAreaElement, pos: number): { top: number; left: number } {
+  const clamped = Math.max(0, Math.min(pos, ta.value.length))
+  const style = window.getComputedStyle(ta)
+
+  const div = document.createElement('div')
+
+  for (const prop of [
+    'boxSizing', 'width',
+    'paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft',
+    'borderTopWidth', 'borderRightWidth', 'borderBottomWidth', 'borderLeftWidth',
+    'fontFamily', 'fontSize', 'fontStyle', 'fontWeight', 'fontVariant',
+    'lineHeight', 'letterSpacing', 'textTransform', 'tabSize',
+  ] as const) {
+    (div.style as unknown as Record<string, string>)[prop] = (style as unknown as Record<string, string>)[prop]
+  }
+
+  div.style.position = 'absolute'
+  div.style.top = '0'
+  div.style.left = '-9999px'
+  div.style.visibility = 'hidden'
+  div.style.whiteSpace = 'pre-wrap'
+  div.style.wordBreak = 'break-word'
+  div.style.overflowWrap = 'break-word'
+  div.style.overflow = 'hidden'
+
+  div.appendChild(document.createTextNode(ta.value.substring(0, clamped)))
+
+  const marker = document.createElement('span')
+  marker.textContent = '​' // zero-width space marks the cursor position
+  div.appendChild(marker)
+
+  // Include the rest so word-wrap matches the textarea exactly
+  div.appendChild(document.createTextNode(ta.value.substring(clamped)))
+
+  document.body.appendChild(div)
+
+  const coords = {
+    top: marker.offsetTop - ta.scrollTop,
+    left: marker.offsetLeft - ta.scrollLeft,
+  }
+
+  document.body.removeChild(div)
+  return coords
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 function applyOp(content: string, op: Op): string {
   const chars = [...(content ?? '')]
@@ -174,8 +359,6 @@ function adjustCursor(cursor: number, op: Op): number {
   return cursor
 }
 
-// Compute the minimal set of ops to go from oldStr to newStr.
-// Handles typing (1 char), paste (N chars) and deletion (1 or more chars).
 function diffToOps(oldStr: string, newStr: string): Op[] {
   const ops: Op[] = []
   const old = oldStr ?? ''
@@ -189,12 +372,9 @@ function diffToOps(oldStr: string, newStr: string): Op[] {
   let ni = next.length - 1
   while (oi >= i && ni >= i && old[oi] === next[ni]) { oi--; ni-- }
 
-  // Delete chars old[i..oi] — iterate in reverse so positions stay valid
   for (let k = oi; k >= i; k--) {
     ops.push({ type: 'delete', pos: k })
   }
-
-  // Insert chars new[i..ni]
   for (let k = i; k <= ni; k++) {
     ops.push({ type: 'insert', pos: k, char: next[k] })
   }
