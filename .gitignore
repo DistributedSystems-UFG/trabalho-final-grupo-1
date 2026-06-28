@@ -1,5 +1,4 @@
 # Go
-go/*/go.sum
 go/**/vendor/
 go/**/*.test
 go/**/tmp/
@@ -24,3 +23,10 @@ frontend/.env.local
 .idea/
 *.iml
 .DS_Store
+.vscode
+
+# Agent
+.agents
+.codex
+.claude
+.ai
