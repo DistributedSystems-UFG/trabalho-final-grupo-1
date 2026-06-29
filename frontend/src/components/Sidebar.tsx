@@ -17,12 +17,29 @@ export default function Sidebar({ onDocumentsChange }: Props) {
   const myUserId = localStorage.getItem('userId') ?? ''
 
   useEffect(() => {
-    api.listDocuments().then(d => {
-      const list = d ?? []
-      setDocs(list)
-      onDocumentsChange?.(list)
-    })
-  }, [])
+    let cancelled = false
+    let retryTimer: number | undefined
+
+    const load = async () => {
+      try {
+        const d = await api.listDocuments()
+        if (cancelled) return
+        const list = d ?? []
+        setDocs(list)
+        onDocumentsChange?.(list)
+      } catch {
+        if (!cancelled) {
+          retryTimer = window.setTimeout(load, 2_000)
+        }
+      }
+    }
+
+    load()
+    return () => {
+      cancelled = true
+      if (retryTimer !== undefined) window.clearTimeout(retryTimer)
+    }
+  }, [onDocumentsChange])
 
   useEffect(() => {
     if (creating) inputRef.current?.focus()
@@ -35,7 +52,11 @@ export default function Sidebar({ onDocumentsChange }: Props) {
     setNewTitle('')
     try {
       const doc = await api.createDocument(title)
-      setDocs(d => [doc, ...d])
+      setDocs(d => {
+        const next = [doc, ...d]
+        onDocumentsChange?.(next)
+        return next
+      })
       navigate(`/documents/${doc.id}`)
     } catch { /* ignore */ }
   }
