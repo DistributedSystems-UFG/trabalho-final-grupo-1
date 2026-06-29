@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { api, DocumentSummary } from '../services/api'
 
+const DOCUMENT_REFRESH_MS = 2_000
+
 interface Props {
   onDocumentsChange?: (docs: DocumentSummary[]) => void
 }
@@ -17,12 +19,33 @@ export default function Sidebar({ onDocumentsChange }: Props) {
   const myUserId = localStorage.getItem('userId') ?? ''
 
   useEffect(() => {
-    api.listDocuments().then(d => {
-      const list = d ?? []
-      setDocs(list)
-      onDocumentsChange?.(list)
-    })
-  }, [])
+    let cancelled = false
+
+    async function refreshDocuments() {
+      try {
+        const list = await api.listDocuments()
+        if (cancelled) return
+
+        const next = list ?? []
+        setDocs(next)
+        onDocumentsChange?.(next)
+
+        if (activeId && !next.some(doc => doc.id === activeId)) {
+          navigate('/documents', { replace: true })
+        }
+      } catch {
+        // Keep the last good list visible while the backend is temporarily unavailable.
+      }
+    }
+
+    refreshDocuments()
+    const timer = window.setInterval(refreshDocuments, DOCUMENT_REFRESH_MS)
+
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [activeId, navigate, onDocumentsChange])
 
   useEffect(() => {
     if (creating) inputRef.current?.focus()
@@ -35,16 +58,18 @@ export default function Sidebar({ onDocumentsChange }: Props) {
     setNewTitle('')
     try {
       const doc = await api.createDocument(title)
-      setDocs(d => [doc, ...d])
+      setDocs(d => [doc, ...d.filter(existing => existing.id !== doc.id)])
       navigate(`/documents/${doc.id}`)
     } catch { /* ignore */ }
   }
 
   async function handleDelete(e: React.MouseEvent, id: string) {
     e.stopPropagation()
-    await api.deleteDocument(id)
-    setDocs(d => d.filter(doc => doc.id !== id))
-    if (activeId === id) navigate('/documents')
+    try {
+      await api.deleteDocument(id)
+      setDocs(d => d.filter(doc => doc.id !== id))
+      if (activeId === id) navigate('/documents', { replace: true })
+    } catch { /* ignore */ }
   }
 
   function handleLogout() {

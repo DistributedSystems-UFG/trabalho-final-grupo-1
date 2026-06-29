@@ -31,6 +31,12 @@ export interface DocumentSummary {
   updatedAt: string
 }
 
+export interface DocumentDetail extends DocumentSummary {
+  content: string
+  version: number
+  createdAt: string
+}
+
 export interface Metrics {
   docId: string
   totalOps: number
@@ -55,17 +61,24 @@ export const api = {
   listDocuments() {
     return request<DocumentSummary[]>('/documents')
   },
+  getDocument(id: string) {
+    return request<DocumentDetail>(`/documents/${id}`)
+  },
   createDocument(title: string) {
     return request<DocumentSummary>('/documents', {
       method: 'POST',
       body: JSON.stringify({ title }),
     })
   },
-  deleteDocument(id: string) {
-    return fetch(`${BASE}/documents/${id}`, {
+  async deleteDocument(id: string) {
+    const res = await fetch(`${BASE}/documents/${id}`, {
       method: 'DELETE',
       headers: authHeaders() as Record<string, string>,
     })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: res.statusText }))
+      throw new Error(err.error ?? err.message ?? 'delete failed')
+    }
   },
   getMetrics(docId: string) {
     return request<Metrics>(`/metrics/${docId}`)

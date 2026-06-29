@@ -3,9 +3,9 @@ package ws
 import (
 	"net/http"
 
+	"github.com/britojp/collabdocs/go/collab-service/internal/hub"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
-	"github.com/britojp/collabdocs/go/collab-service/internal/hub"
 )
 
 var upgrader = websocket.Upgrader{

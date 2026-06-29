@@ -13,8 +13,25 @@ Projeto desenvolvido para a disciplina **Sistemas Concorrentes e Distribuídos �
 | Frontend | React 18 + TypeScript + Vite + nginx |
 | Serviço de tempo real | Go 1.22 + Gin + gorilla/websocket |
 | Backend / API | Java 21 + Spring Boot 3.3 + Spring AMQP |
+| Replicação em tempo real | Redis 7 Pub/Sub + lock SETNX por documento |
 | Mensageria | RabbitMQ 3.13 |
 | Banco de dados | PostgreSQL 16 |
+
+---
+
+## Arquitetura
+
+A visão detalhada está em [docs/architecture.md](docs/architecture.md).
+
+Diagrama PlantUML da aplicação:
+
+- [docs/application.puml](docs/application.puml)
+
+Para renderizar localmente:
+
+```bash
+plantuml docs/application.puml
+```
 
 ---
 
@@ -23,7 +40,7 @@ Projeto desenvolvido para a disciplina **Sistemas Concorrentes e Distribuídos �
 ### Pré-requisitos
 
 - [Docker](https://docs.docker.com/get-docker/) e Docker Compose instalados
-- Portas **4000**, **8080**, **8081**, **5432** e **15672** disponíveis no host
+- Portas **4000**, **8080**, **8081**, **8082**, **5432**, **6379** e **15672** disponíveis no host
 
 ### 1. Clone o repositório
 
@@ -55,7 +72,9 @@ Todos devem estar com status `running`. O Java Backend pode levar ~20s para inic
 | Aplicação (frontend) | http://localhost:4000 |
 | RabbitMQ Management | http://localhost:15672 (user: `collabdocs` / senha: `collabdocs`) |
 | Java Backend (direto) | http://localhost:8081 |
-| Go Collab Service (direto) | http://localhost:8080 |
+| Go Collab Service (instância 1) | http://localhost:8080 |
+| Go Collab Service (instância 2) | http://localhost:8082 |
+| Redis (replicação Pub/Sub) | localhost:6379 |
 
 ### 5. Login
 
@@ -80,6 +99,26 @@ Para testar a colaboração com dois usuários, use a opção **Cadastre-se** na
 
 > Usar dois navegadores diferentes (ou um em modo incógnito) é necessário porque o `localStorage` é compartilhado entre abas do mesmo navegador.
 
+### Teste automatizado de consistência
+
+Com a stack rodando, execute:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\infra\runtime-consistency-test.ps1
+```
+
+O teste cria dois usuários, valida criação/exclusão entre clientes, replica conteúdo via WebSocket nas duas instâncias Go, confere o snapshot persistido no PostgreSQL e força failover de liderança.
+
+Também há wrappers para outros ambientes:
+
+| Ambiente | Comando |
+|----------|---------|
+| Windows BAT | `.\infra\runtime-consistency-test.bat` |
+| Linux / WSL | `bash ./infra/runtime-consistency-test.sh` |
+| macOS | `./infra/runtime-consistency-test.command` |
+
+Veja a documentação completa em [docs/tests.md](docs/tests.md).
+
 ---
 
 ## Parando os serviços
@@ -92,6 +131,26 @@ docker compose -f infra/docker-compose.yml down
 docker compose -f infra/docker-compose.yml down -v
 ```
 
+### Reset completo (banco zerado + imagens locais)
+
+No PowerShell, na raiz do projeto:
+
+```powershell
+.\infra\reset.ps1
+docker compose -f infra/docker-compose.yml up -d --build
+```
+
+Ou via Make:
+
+```bash
+make down
+docker compose -f infra/docker-compose.yml up -d --build
+```
+
+> **Importante:** `down` sem `-v` **não apaga** usuários/documentos — eles ficam no volume `infra_postgres_data`.
+>
+> No navegador, limpe o **localStorage** (ou use janela anônima) para remover tokens de sessão antigos.
+
 ---
 
 ## Estrutura do projeto
@@ -99,8 +158,11 @@ docker compose -f infra/docker-compose.yml down -v
 ```
 collab-docs/
 ├── docs/
+│   ├── application.puml      # Diagrama PlantUML da aplicação
 │   ├── architecture.md       # Arquitetura detalhada do sistema
-│   └── development-status.md # Relatório de desenvolvimento
+│   ├── development-status.md # Relatório de desenvolvimento
+│   ├── failover-test.md      # Teste de failover de liderança (runtime)
+│   └── tests.md              # Guia central de testes
 ├── frontend/                 # React SPA + nginx
 ├── go/
 │   └── collab-service/       # Serviço Go (proxy + WebSocket hub)
@@ -108,6 +170,11 @@ collab-docs/
 │   └── backend/              # Spring Boot (auth, docs, workers AMQP)
 ├── infra/
 │   ├── docker-compose.yml    # Orquestração de todos os serviços
+│   ├── reset.ps1             # Reset completo do ambiente local
+│   ├── runtime-consistency-test.ps1 # Teste runtime multi-cliente/failover (base)
+│   ├── runtime-consistency-test.bat # Wrapper Windows
+│   ├── runtime-consistency-test.sh  # Wrapper Linux/WSL
+│   ├── runtime-consistency-test.command # Wrapper macOS
 │   └── postgres/
 │       ├── init.sql          # Schema do banco
 │       └── seed.sql          # Dados iniciais (usuário admin)
@@ -120,3 +187,6 @@ collab-docs/
 
 - [Arquitetura do sistema](docs/architecture.md)
 - [Relatório de desenvolvimento](docs/development-status.md)
+- [Testes do projeto](docs/tests.md)
+- [Teste de failover de liderança](docs/failover-test.md)
+- [Diagrama PlantUML da aplicação](docs/application.puml)

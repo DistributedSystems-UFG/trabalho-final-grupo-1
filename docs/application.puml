@@ -1,0 +1,115 @@
+@startuml CollabDocs
+title CollabDocs - Arquitetura da Aplicacao
+
+skinparam componentStyle rectangle
+skinparam shadowing false
+skinparam linetype ortho
+skinparam packageStyle rectangle
+
+actor "Usuario A" as UserA
+actor "Usuario B" as UserB
+
+node "Browser" as Browser {
+  component "React SPA\nEditor + Sidebar" as SPA
+}
+
+node "Frontend Container" as Frontend {
+  component "nginx\n:4000" as Nginx
+}
+
+node "Go Collab #1\n:8080" as Go1 {
+  component "JWT Middleware" as Jwt1
+  component "REST Proxy" as Proxy1
+  component "Hub Manager" as HubManager1
+  component "Document Hub Actor" as Hub1
+}
+
+node "Go Collab #2\n:8082" as Go2 {
+  component "JWT Middleware" as Jwt2
+  component "REST Proxy" as Proxy2
+  component "Hub Manager" as HubManager2
+  component "Document Hub Actor" as Hub2
+}
+
+database "Redis 7\nPub/Sub + SETNX TTL" as Redis {
+  component "doc:{id}:leader" as RedisLeader
+  component "doc:{id}:proposals" as RedisProposals
+  component "doc:{id}:commits" as RedisCommits
+}
+
+queue "RabbitMQ\nTopic Exchange: collab" as RabbitMQ {
+  component "q.ops.persist" as QPersist
+  component "q.ops.metric" as QMetric
+  component "q.ops.spell" as QSpell
+}
+
+node "Java Backend\nSpring Boot :8081" as Java {
+  component "Auth Controller" as Auth
+  component "Document Controller" as Docs
+  component "Operation Consumer" as OpConsumer
+  component "Metric Worker" as MetricWorker
+  component "Spell Worker" as SpellWorker
+}
+
+database "PostgreSQL 16" as Postgres {
+  component "users" as Users
+  component "documents\ncontent + version" as Documents
+  component "operations\nhash partitions" as Operations
+  component "metrics" as Metrics
+}
+
+UserA --> SPA
+UserB --> SPA
+
+SPA --> Nginx : HTTP /api/*
+SPA --> Nginx : WebSocket /api/ws/{docId}
+
+Nginx --> Go1 : round-robin\nHTTP + WebSocket
+Nginx --> Go2 : round-robin\nHTTP + WebSocket
+
+Jwt1 --> Proxy1
+Jwt2 --> Proxy2
+Proxy1 --> Java : REST + X-User-ID
+Proxy2 --> Java : REST + X-User-ID
+
+HubManager1 --> Hub1 : actor per document
+HubManager2 --> Hub2 : actor per document
+
+Hub1 --> RedisProposals : publish proposal
+Hub2 --> RedisProposals : publish proposal
+RedisProposals --> Hub1 : leader consumes
+RedisProposals --> Hub2 : leader consumes
+
+Hub1 --> RedisLeader : SETNX / renew TTL
+Hub2 --> RedisLeader : SETNX / renew TTL
+
+Hub1 --> RedisCommits : publish commit
+Hub2 --> RedisCommits : publish commit
+RedisCommits --> Hub1 : apply remote commit
+RedisCommits --> Hub2 : apply remote commit
+
+Hub1 --> RabbitMQ : confirmed op
+Hub2 --> RabbitMQ : confirmed op
+
+RabbitMQ --> OpConsumer : op.persist
+RabbitMQ --> MetricWorker : op.metric
+RabbitMQ --> SpellWorker : op.spell
+
+Auth --> Users
+Docs --> Documents
+OpConsumer --> Operations
+OpConsumer --> Documents : update snapshot
+MetricWorker --> Metrics
+
+note right of Redis
+  Redis e efemero:
+  - lideranca por documento
+  - fan-out realtime entre Hubs
+end note
+
+note bottom of RabbitMQ
+  RabbitMQ/PostgreSQL sao o caminho duravel:
+  historico, metricas e snapshot do conteudo.
+end note
+
+@enduml

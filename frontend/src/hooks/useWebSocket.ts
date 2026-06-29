@@ -17,6 +17,8 @@ interface Options {
   onMessage: (msg: ServerMsg) => void
 }
 
+const RECONNECT_MS = 1_000
+
 export function useWebSocket(docId: string, options: Options) {
   const wsRef = useRef<WebSocket | null>(null)
   const versionRef = useRef(0)
@@ -26,29 +28,61 @@ export function useWebSocket(docId: string, options: Options) {
   const [connected, setConnected] = useState(false)
 
   useEffect(() => {
-    const ws = new WebSocket(wsUrl(docId))
-    wsRef.current = ws
+    let stopped = false
+    let retry: number | undefined
 
-    ws.onopen  = () => setConnected(true)
-    ws.onclose = () => setConnected(false)
-    ws.onerror = (e) => console.error('[ws] error', e)
+    versionRef.current = 0
+    setConnected(false)
 
-    ws.onmessage = ({ data }) => {
-      try {
-        const msg: ServerMsg = JSON.parse(data)
-        console.debug('[ws] recv', msg.type, msg)
-        if (msg.type === 'resync' || msg.type === 'op') {
-          versionRef.current = msg.serverVersion
+    function connect() {
+      if (stopped) return
+
+      const ws = new WebSocket(wsUrl(docId))
+      wsRef.current = ws
+
+      ws.onopen = () => {
+        if (!stopped && wsRef.current === ws) setConnected(true)
+      }
+
+      ws.onclose = () => {
+        if (wsRef.current === ws) {
+          wsRef.current = null
+          setConnected(false)
         }
-        optionsRef.current.onMessage(msg)
-      } catch {
-        console.warn('[ws] malformed message', data)
+        if (!stopped) {
+          retry = window.setTimeout(connect, RECONNECT_MS)
+        }
+      }
+
+      ws.onerror = (e) => console.error('[ws] error', e)
+
+      ws.onmessage = ({ data }) => {
+        if (stopped || wsRef.current !== ws) return
+        try {
+          const msg: ServerMsg = JSON.parse(data)
+          console.debug('[ws] recv', msg.type, msg)
+          if (msg.type === 'resync' || msg.type === 'op') {
+            versionRef.current = msg.serverVersion
+          }
+          optionsRef.current.onMessage(msg)
+        } catch {
+          console.warn('[ws] malformed message', data)
+        }
       }
     }
 
+    connect()
+
     return () => {
-      ws.onopen = ws.onclose = ws.onerror = ws.onmessage = null
-      ws.close()
+      stopped = true
+      if (retry !== undefined) window.clearTimeout(retry)
+      const ws = wsRef.current
+      wsRef.current = null
+      setConnected(false)
+      if (ws) {
+        ws.onopen = ws.onclose = ws.onerror = ws.onmessage = null
+        ws.close()
+      }
     }
   }, [docId])
 

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { useParams } from 'react-router-dom'
+import { useNavigate, useParams } from 'react-router-dom'
 import Sidebar from '../components/Sidebar'
 import { useWebSocket, ServerMsg, Op } from '../hooks/useWebSocket'
 import { api, Metrics } from '../services/api'
@@ -16,6 +16,7 @@ function avatarColor(userId: string) {
 
 export default function EditorPage() {
   const { id: docId } = useParams<{ id: string }>()
+  const navigate = useNavigate()
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const contentRef = useRef('')
   const [content, setContent] = useState('')
@@ -27,14 +28,29 @@ export default function EditorPage() {
   // Keep contentRef in sync for use inside WS handler (avoids stale closures)
   useEffect(() => { contentRef.current = content }, [content])
 
-  // Load document title
+  // Reset document-local UI immediately. The WebSocket resync will fill content.
   useEffect(() => {
     if (!docId) return
-    api.listDocuments().then(docs => {
-      const found = docs.find(d => d.id === docId)
-      if (found) setDocTitle(found.title)
-    })
-  }, [docId])
+
+    let cancelled = false
+    setContent('')
+    contentRef.current = ''
+    setDocTitle('Carregando...')
+    setUsers([])
+    setMetrics(null)
+
+    api.getDocument(docId)
+      .then(doc => {
+        if (!cancelled) setDocTitle(doc.title)
+      })
+      .catch(() => {
+        if (!cancelled) navigate('/documents', { replace: true })
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [docId, navigate])
 
   // Metrics polling (every 10s)
   useEffect(() => {
