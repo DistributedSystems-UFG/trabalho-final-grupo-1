@@ -4,12 +4,13 @@ import (
 	"log"
 	"os"
 
-	"github.com/gin-gonic/gin"
 	"github.com/britojp/collabdocs/go/collab-service/internal/api"
 	"github.com/britojp/collabdocs/go/collab-service/internal/hub"
 	"github.com/britojp/collabdocs/go/collab-service/internal/middleware"
 	"github.com/britojp/collabdocs/go/collab-service/internal/mq"
+	"github.com/britojp/collabdocs/go/collab-service/internal/replication"
 	"github.com/britojp/collabdocs/go/collab-service/internal/ws"
+	"github.com/gin-gonic/gin"
 )
 
 func main() {
@@ -22,10 +23,21 @@ func main() {
 	}
 	defer pub.Close()
 
-	manager := hub.NewManager(pub, javaURL)
+	bus, err := replication.NewRedisBus(env("REDIS_URL", "redis://localhost:6379/0"))
+	if err != nil {
+		log.Fatalf("redis: %v", err)
+	}
+	defer bus.Close()
+	log.Printf("redis: replication bus connected as %s", bus.NodeID())
+
+	manager := hub.NewManager(pub, bus, javaURL)
 
 	r := gin.Default()
 	r.Use(cors())
+
+	// Observability — used by failover/replication runtime tests (no auth).
+	r.GET("/health", api.Health(bus))
+	r.GET("/replication/documents/:docId", api.DocumentReplication(manager))
 
 	// Public — proxied to Java
 	r.POST("/auth/register", api.Proxy(javaURL))

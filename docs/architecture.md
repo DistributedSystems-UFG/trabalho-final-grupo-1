@@ -25,7 +25,8 @@ CollabDocs é um editor de documentos colaborativo em tempo real construído com
    │   JWT validate)  │   │  (WebSocket / OT)    │
    └────────┬─────────┘   └──────────┬───────────┘
             │ HTTP proxy              │ AMQP publish
-            ▼                        ▼
+            │                         ├───────────────┐
+            ▼                         ▼               ▼
    ┌──────────────────┐   ┌──────────────────────┐
    │  Java Backend    │   │      RabbitMQ         │
    │  Spring Boot     │   │  exchange: collab     │
@@ -40,6 +41,13 @@ CollabDocs é um editor de documentos colaborativo em tempo real construído com
    └──────────────────┘   │  MetricWorker        │
                           │  SpellWorker         │
                           └──────────────────────┘
+
+   ┌──────────────────────────────────────────────────────────┐
+   │ Redis Pub/Sub + SETNX lock                               │
+   │ doc:{id}:proposals → operações recebidas por qualquer Go │
+   │ doc:{id}:commits   → operações ordenadas pelo líder      │
+   │ doc:{id}:leader    → lock de liderança com TTL           │
+   └──────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -102,6 +110,16 @@ Cada operação (`insert` / `delete`) carrega `pos` e `char`. O servidor é a au
 
 Cada operação feita no editor é publicada simultaneamente nas três filas, permitindo processamento paralelo e desacoplado.
 
+### Redis
+- **Porta:** 6379
+- **Responsabilidade:** replicação efêmera e de baixa latência entre múltiplas instâncias do serviço Go.
+- **Pub/Sub por documento:**
+  - `collabdocs:doc:{docId}:proposals`: recebe operações vindas de qualquer instância Go.
+  - `collabdocs:doc:{docId}:commits`: distribui operações já ordenadas pelo líder do documento.
+- **Liderança:** `collabdocs:doc:{docId}:leader` usa `SETNX` com TTL. Apenas o líder transforma, incrementa versão e confirma operações para o documento.
+
+Redis não substitui RabbitMQ: Redis mantém a experiência em tempo real entre Hubs; RabbitMQ/PostgreSQL continuam sendo o caminho durável para persistência, métricas, workers e snapshot de conteúdo.
+
 ### PostgreSQL 16
 - **Porta:** 5432
 - **Schema principal:**
@@ -138,12 +156,20 @@ EditorPage.handleChange()
        │
     Hub.ReadPump() → incoming chan
        │
-    Hub.run() → handleOp()
+    Hub.run() → PublishProposal(Redis)
+       │
+       ▼ collabdocs:doc:{id}:proposals
+    Hub líder do documento
        ├── transform(op, serverVersion - clientVersion)
-       ├── apply(content, op)        → content atualizado
+       ├── apply(content, op)
        ├── version++
-       ├── broadcastExcept(clientA)  → Usuário B recebe op
-       └── go pub.PublishOp(...)     → RabbitMQ (persist + metric + spell)
+       ├── PublishOp(...)            → RabbitMQ (persist + snapshot + metric + spell)
+       └── PublishCommit(Redis)
+       │
+       ▼ collabdocs:doc:{id}:commits
+    Hubs em todas as instâncias Go
+       ├── apply(content, op)
+       └── broadcast local           → clientes conectados naquela instância
        │
        ▼ WebSocket frame para Usuário B
        │
@@ -181,6 +207,7 @@ Frontend → Authorization: Bearer <JWT>
 | Estado do documento | Goroutine Actor exclusivo por documento (sem mutex) |
 | Múltiplos clientes no mesmo doc | Canais Go (`register`, `unregister`, `incoming`) |
 | Múltiplos documentos simultâneos | `Manager` com `sync.RWMutex` + double-checked locking |
+| Replicação entre instâncias Go | Redis Pub/Sub (`proposals`/`commits`) + lock `SETNX` por documento |
 | Processamento assíncrono de ops | RabbitMQ topic exchange; workers Java independentes |
 | Workers em paralelo (spell) | `@RabbitListener(concurrency = "2")` |
 | Particionamento de dados | PostgreSQL HASH partition em `operations` |

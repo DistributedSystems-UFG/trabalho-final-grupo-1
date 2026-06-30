@@ -92,13 +92,13 @@ A função `transform()` no Go retorna a operação sem modificação quando há
 O `SpellWorker` consome as mensagens da fila `q.ops.spell` mas não implementa verificação ortográfica real — apenas loga a operação. A tabela `spell_issues` existe no banco mas não é populada.
 
 ### Persistência de conteúdo
-O conteúdo do documento é mantido em memória no Hub Go e reconstruído a partir do estado inicial carregado do Java. Quando o Hub é destruído (todos saem do documento), o conteúdo acumulado **não é persistido automaticamente** de volta ao banco. O histórico de operações está no PostgreSQL via RabbitMQ, mas não há lógica de replay para reconstruir o documento a partir das ops.
+Cada operação confirmada pelo líder Go é enviada ao RabbitMQ antes do broadcast do commit. O `OperationConsumer` persiste o histórico em `operations` e aplica a mesma operação no snapshot `documents.content/version`. Assim, ao reabrir um documento ou após failover/restart, novos Hubs carregam o conteúdo atual do Java/PostgreSQL.
 
 ### doc_permissions
 A tabela `doc_permissions` existe no schema mas não é utilizada. O modelo atual permite que todos os usuários autenticados vejam e editem qualquer documento (workspace compartilhado).
 
-### Ausência de reconexão automática
-O `useWebSocket` no frontend não implementa reconexão automática com backoff. Se o WebSocket cair (reinício do Go), o usuário precisa recarregar a página manualmente.
+### Reconexão WebSocket
+O `useWebSocket` reinicia a conexão quando o socket cai ou quando o usuário troca de documento. A versão local é resetada por documento e mensagens de conexões antigas são ignoradas para evitar vazamento de conteúdo entre editores.
 
 ---
 

@@ -1,5 +1,7 @@
 package hub
 
+import "github.com/britojp/collabdocs/go/collab-service/internal/replication"
+
 // Op is a character-level document operation.
 type Op struct {
 	Type string `json:"type"` // "insert" | "delete"
@@ -9,7 +11,7 @@ type Op struct {
 
 // ClientMessage is received from a WebSocket client.
 type ClientMessage struct {
-	Type          string `json:"type"`          // "op" | "cursor"
+	Type          string `json:"type"` // "op" | "cursor"
 	ClientVersion int    `json:"clientVersion"`
 	Op            *Op    `json:"op,omitempty"`
 	Pos           int    `json:"pos,omitempty"` // absolute character offset (cursor events)
@@ -31,4 +33,23 @@ type ServerMessage struct {
 type PresenceUser struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
+}
+
+func toReplicationOp(op *Op) replication.Operation {
+	if op == nil {
+		return replication.Operation{}
+	}
+	return replication.Operation{
+		Type: op.Type,
+		Pos:  op.Pos,
+		Char: op.Char,
+	}
+}
+
+func fromReplicationOp(op replication.Operation) *Op {
+	return &Op{
+		Type: op.Type,
+		Pos:  op.Pos,
+		Char: op.Char,
+	}
 }

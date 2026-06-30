@@ -55,6 +55,7 @@ public class DocumentService {
         docs.delete(doc);
     }
 
+    @Transactional
     public void updateContent(UUID id, String content, int version) {
         docs.findById(id).ifPresent(doc -> {
             doc.setContent(content);

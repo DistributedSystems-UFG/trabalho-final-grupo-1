@@ -36,6 +36,18 @@ services:
       timeout: 10s
       retries: 10
 
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "no"]
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
   java-backend:
     build:
       context: ../java/backend
@@ -79,11 +91,34 @@ services:
       PORT: 8080
       JAVA_BACKEND_URL: http://java-backend:8081
       RABBITMQ_URL: amqp://collabdocs:collabdocs@rabbitmq:5672/
+      REDIS_URL: redis://redis:6379/0
       JWT_SECRET: ${JWT_SECRET:-collabdocs-dev-secret-key-32chars!!}
     ports:
       - "8080:8080"
     depends_on:
       rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      java-backend:
+        condition: service_started
+
+  go-collab-2:
+    build:
+      context: ../go/collab-service
+    restart: unless-stopped
+    environment:
+      PORT: 8080
+      JAVA_BACKEND_URL: http://java-backend:8081
+      RABBITMQ_URL: amqp://collabdocs:collabdocs@rabbitmq:5672/
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET: ${JWT_SECRET:-collabdocs-dev-secret-key-32chars!!}
+    ports:
+      - "8083:8080"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
         condition: service_healthy
       java-backend:
         condition: service_started
@@ -97,6 +132,7 @@ services:
     depends_on:
       - go-collab
       - grpc-web
+      - go-collab-2
 
 volumes:
   postgres_data:

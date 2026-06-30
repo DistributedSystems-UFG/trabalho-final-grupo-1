@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { useParams } from 'react-router-dom'
+import { useNavigate, useParams } from 'react-router-dom'
 import Sidebar from '../components/Sidebar'
 import { useWebSocket, ServerMsg, Op } from '../hooks/useWebSocket'
 import { api, DocumentAnalytics } from '../services/api'
@@ -18,6 +18,7 @@ function avatarColor(userId: string) {
 
 export default function EditorPage() {
   const { id: docId } = useParams<{ id: string }>()
+  const navigate = useNavigate()
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const contentRef = useRef('')
   const [content, setContent] = useState('')
@@ -31,11 +32,26 @@ export default function EditorPage() {
 
   useEffect(() => {
     if (!docId) return
-    api.listDocuments().then(docs => {
-      const found = docs.find(d => d.id === docId)
-      if (found) setDocTitle(found.title)
-    })
-  }, [docId])
+
+    let cancelled = false
+    setContent('')
+    contentRef.current = ''
+    setDocTitle('Carregando...')
+    setUsers([])
+    setMetrics(null)
+
+    api.getDocument(docId)
+      .then(doc => {
+        if (!cancelled) setDocTitle(doc.title)
+      })
+      .catch(() => {
+        if (!cancelled) navigate('/documents', { replace: true })
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [docId, navigate])
 
   useEffect(() => {
     if (!docId) return

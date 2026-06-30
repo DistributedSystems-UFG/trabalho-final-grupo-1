@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/britojp/collabdocs/go/collab-service/internal/mq"
+	"github.com/britojp/collabdocs/go/collab-service/internal/replication"
 )
 
 // Manager holds all active document hubs.
@@ -16,13 +17,15 @@ type Manager struct {
 	mu          sync.RWMutex
 	hubs        map[string]*Hub
 	pub         *mq.Publisher
+	bus         replication.Bus
 	javaBaseURL string
 }
 
-func NewManager(pub *mq.Publisher, javaBaseURL string) *Manager {
+func NewManager(pub *mq.Publisher, bus replication.Bus, javaBaseURL string) *Manager {
 	return &Manager{
 		hubs:        make(map[string]*Hub),
 		pub:         pub,
+		bus:         bus,
 		javaBaseURL: javaBaseURL,
 	}
 }
@@ -45,7 +48,7 @@ func (m *Manager) GetOrCreate(docID string) *Hub {
 	}
 
 	snapshot := m.fetchSnapshot(docID)
-	h := newHub(docID, snapshot.Content, snapshot.Version, m.pub)
+	h := newHub(docID, snapshot.Content, snapshot.Version, m.pub, m.bus)
 	m.hubs[docID] = h
 	go h.run()
 	log.Printf("manager: started hub for doc %s at version %d", docID, snapshot.Version)
