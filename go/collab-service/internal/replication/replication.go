@@ -38,12 +38,29 @@ type Commit struct {
 	Op             Operation `json:"op"`
 }
 
+// ResyncRequest is sent by a follower when it detects a version gap, asking
+// the leader to publish the authoritative document state.
+type ResyncRequest struct {
+	DocID        string `json:"docId"`
+	FromNodeID   string `json:"fromNodeId"`
+	KnownVersion int    `json:"knownVersion"`
+}
+
+// ResyncResponse carries the full document state from the leader to all nodes.
+type ResyncResponse struct {
+	DocID   string `json:"docId"`
+	Content string `json:"content"`
+	Version int    `json:"version"`
+}
+
 // Message is delivered by a Bus subscription. A document Hub subscribes once
-// and receives both proposals and commits for that document.
+// and receives proposals, commits and resync control messages for that document.
 type Message struct {
-	Kind     string    `json:"kind"`
-	Proposal *Proposal `json:"proposal,omitempty"`
-	Commit   *Commit   `json:"commit,omitempty"`
+	Kind           string          `json:"kind"`
+	Proposal       *Proposal       `json:"proposal,omitempty"`
+	Commit         *Commit         `json:"commit,omitempty"`
+	ResyncRequest  *ResyncRequest  `json:"resyncRequest,omitempty"`
+	ResyncResponse *ResyncResponse `json:"resyncResponse,omitempty"`
 }
 
 const (
@@ -51,6 +68,12 @@ const (
 	MessageKindProposal = "proposal"
 	// MessageKindCommit identifies operations confirmed by the document leader.
 	MessageKindCommit = "commit"
+	// MessageKindResyncRequest is sent by a follower that detected a version gap.
+	// It travels via the proposals channel so only the leader processes it.
+	MessageKindResyncRequest = "resync_request"
+	// MessageKindResyncResponse carries the full document state from the leader.
+	// It travels via the commits channel so every node receives it.
+	MessageKindResyncResponse = "resync_response"
 )
 
 // Bus is the replication boundary used by the Hub Actor. Implementations may
@@ -61,6 +84,12 @@ type Bus interface {
 	Subscribe(ctx context.Context, docID string) (<-chan Message, func() error, error)
 	PublishProposal(ctx context.Context, proposal Proposal) error
 	PublishCommit(ctx context.Context, commit Commit) error
+	// PublishResyncRequest asks the leader to publish the full document state.
+	// It is sent when a follower detects a version gap.
+	PublishResyncRequest(ctx context.Context, req ResyncRequest) error
+	// PublishResyncResponse broadcasts the authoritative document state to all nodes.
+	// Only the leader should call this.
+	PublishResyncResponse(ctx context.Context, resp ResyncResponse) error
 	TryAcquireLeadership(ctx context.Context, docID string, ttl time.Duration) (bool, error)
 	RenewLeadership(ctx context.Context, docID string, ttl time.Duration) (bool, error)
 	// GetLeader returns the node ID currently holding the document lock in Redis.

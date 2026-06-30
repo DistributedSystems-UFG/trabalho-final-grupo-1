@@ -26,12 +26,13 @@ type statusRequest struct {
 }
 
 // Hub is an actor goroutine that serialises all state mutations for one document.
-// It is the only writer of content and version — no mutex needed for these fields.
+// It is the only writer of content, version and ops — no mutex needed for these fields.
 type Hub struct {
 	docID      string
 	clients    map[*Client]bool
 	content    string
 	version    int
+	ops        []Op // ops[i] was applied to produce version i+1; needed for OT transforms
 	register   chan *Client
 	unregister chan *Client
 	incoming   chan incomingMsg
@@ -50,6 +51,7 @@ func newHub(docID, content string, pub *mq.Publisher, bus replication.Bus) *Hub 
 		docID:      docID,
 		clients:    make(map[*Client]bool),
 		content:    content,
+		ops:        make([]Op, 0, 64),
 		register:   make(chan *Client, 16),
 		unregister: make(chan *Client, 16),
 		incoming:   make(chan incomingMsg, 256),
@@ -130,16 +132,18 @@ func (h *Hub) handleOp(c *Client, env ClientMessage) {
 	if env.Op == nil {
 		return
 	}
+	if env.ClientVersion < 0 || env.ClientVersion > h.version {
+		h.sendTo(c, ServerMessage{Type: "resync", ServerVersion: h.version, Content: h.content})
+		return
+	}
 
 	if h.bus == nil || h.repMessages == nil {
-		op := transform(env.Op, h.version-env.ClientVersion)
-		h.commitLocal(c, op)
+		h.commitLocal(c, env.Op, env.ClientVersion)
 		return
 	}
 
 	// Any node can receive a WebSocket operation. The operation is published as
 	// a proposal and only the Redis leader for this document will order it.
-	h.ensureLeadership()
 	ctx, cancel := context.WithTimeout(context.Background(), replicationTimeout)
 	defer cancel()
 
@@ -165,6 +169,14 @@ func (h *Hub) handleReplication(msg replication.Message) {
 		if msg.Commit != nil {
 			h.handleCommit(*msg.Commit)
 		}
+	case replication.MessageKindResyncRequest:
+		if msg.ResyncRequest != nil {
+			h.handleResyncRequest(*msg.ResyncRequest)
+		}
+	case replication.MessageKindResyncResponse:
+		if msg.ResyncResponse != nil {
+			h.handleResyncResponse(*msg.ResyncResponse)
+		}
 	}
 }
 
@@ -173,9 +185,13 @@ func (h *Hub) handleProposal(proposal replication.Proposal) {
 		return
 	}
 
-	op := transform(fromReplicationOp(proposal.Op), h.version-proposal.ClientVersion)
+	op := transformSince(fromReplicationOp(proposal.Op), h.ops, proposal.ClientVersion)
+	if op == nil {
+		return
+	}
 	h.content = apply(h.content, op)
 	h.version++
+	h.ops = append(h.ops, *op)
 
 	commit := replication.Commit{
 		DocID:          h.docID,
@@ -203,67 +219,124 @@ func (h *Hub) handleCommit(commit replication.Commit) {
 	if commit.ServerVersion <= h.version {
 		return
 	}
+	if commit.ServerVersion > h.version+1 {
+		// One or more commits were dropped by Redis Pub/Sub. Request the leader
+		// to publish the full document state so we can recover.
+		log.Printf("hub[%s]: version gap detected (local=%d incoming=%d), requesting resync",
+			h.docID, h.version, commit.ServerVersion)
+		h.requestResync()
+		return
+	}
 
 	op := fromReplicationOp(commit.Op)
 	h.content = apply(h.content, op)
 	h.version = commit.ServerVersion
+	h.ops = append(h.ops, *op)
 	h.broadcastCommit(commit)
 }
 
-func (h *Hub) commitLocal(origin *Client, op *Op) {
-	h.content = apply(h.content, op)
-	h.version++
+func (h *Hub) requestResync() {
+	ctx, cancel := context.WithTimeout(context.Background(), replicationTimeout)
+	defer cancel()
+	if err := h.bus.PublishResyncRequest(ctx, replication.ResyncRequest{
+		DocID:        h.docID,
+		FromNodeID:   h.bus.NodeID(),
+		KnownVersion: h.version,
+	}); err != nil {
+		log.Printf("hub[%s]: publish resync request failed: %v", h.docID, err)
+	}
+}
 
-	h.broadcastExcept(origin, ServerMessage{
-		Type:          "op",
-		ServerVersion: h.version,
-		UserID:        origin.userID,
-		Op:            op,
-	})
-
-	if h.pub == nil {
+func (h *Hub) handleResyncRequest(req replication.ResyncRequest) {
+	if !h.isLeader {
 		return
 	}
+	log.Printf("hub[%s]: resync requested by %s (known version %d), publishing state at version %d",
+		h.docID, req.FromNodeID, req.KnownVersion, h.version)
+	ctx, cancel := context.WithTimeout(context.Background(), replicationTimeout)
+	defer cancel()
+	if err := h.bus.PublishResyncResponse(ctx, replication.ResyncResponse{
+		DocID:   h.docID,
+		Content: h.content,
+		Version: h.version,
+	}); err != nil {
+		log.Printf("hub[%s]: publish resync response failed: %v", h.docID, err)
+	}
+}
 
-	h.pub.PublishOp(mq.OpEvent{
-		DocID:     h.docID,
-		UserID:    origin.userID,
-		Version:   h.version,
-		Type:      op.Type,
-		Pos:       op.Pos,
-		Character: op.Char,
+func (h *Hub) handleResyncResponse(resp replication.ResyncResponse) {
+	if resp.Version <= h.version {
+		return
+	}
+	log.Printf("hub[%s]: applying resync (local version %d → %d)", h.docID, h.version, resp.Version)
+	h.content = resp.Content
+	h.version = resp.Version
+	h.broadcast(ServerMessage{
+		Type:          "resync",
+		ServerVersion: h.version,
+		Content:       h.content,
 	})
+}
+
+func (h *Hub) commitLocal(origin *Client, rawOp *Op, clientVersion int) {
+	op := transformSince(rawOp, h.ops, clientVersion)
+	if op != nil {
+		h.content = apply(h.content, op)
+		h.version++
+		h.ops = append(h.ops, *op)
+
+		h.broadcastExcept(origin, ServerMessage{
+			Type:          "op",
+			ServerVersion: h.version,
+			UserID:        origin.userID,
+			Op:            op,
+		})
+
+		h.publishDurableOp(replication.Commit{
+			DocID:         h.docID,
+			UserID:        origin.userID,
+			ServerVersion: h.version,
+			Op:            toReplicationOp(op),
+		})
+	}
+
+	h.sendTo(origin, ServerMessage{Type: "ack", ServerVersion: h.version})
 }
 
 func (h *Hub) publishDurableOp(commit replication.Commit) {
 	if h.pub == nil {
 		return
 	}
-
-	h.pub.PublishOp(mq.OpEvent{
-		DocID:     h.docID,
-		UserID:    commit.UserID,
-		Version:   commit.ServerVersion,
-		Type:      commit.Op.Type,
-		Pos:       commit.Op.Pos,
-		Character: commit.Op.Char,
-	})
+	eventType := "INSERT"
+	if commit.Op.Type == "delete" {
+		eventType = "DELETE"
+	}
+	h.pub.PublishDocEvent(mq.NewDocEvent(
+		commit.DocID,
+		commit.UserID,
+		commit.ServerVersion,
+		eventType,
+		commit.Op.Pos,
+		commit.Op.Char,
+		h.content,
+	))
 }
 
 func (h *Hub) broadcastCommit(commit replication.Commit) {
-	msg := ServerMessage{
+	opRaw, _ := json.Marshal(ServerMessage{
 		Type:          "op",
 		ServerVersion: commit.ServerVersion,
 		UserID:        commit.UserID,
 		Op:            fromReplicationOp(commit.Op),
-	}
+	})
+	ackRaw, _ := json.Marshal(ServerMessage{Type: "ack", ServerVersion: commit.ServerVersion})
 
-	raw, _ := json.Marshal(msg)
 	for c := range h.clients {
 		if h.bus != nil && commit.OriginNodeID == h.bus.NodeID() && c.id == commit.OriginClientID {
+			h.sendRaw(c, ackRaw)
 			continue
 		}
-		h.sendRaw(c, raw)
+		h.sendRaw(c, opRaw)
 	}
 }
 
@@ -329,8 +402,7 @@ func (h *Hub) handleCursor(c *Client, env ClientMessage) {
 		Type:   "cursor",
 		UserID: c.userID,
 		Name:   c.name,
-		Line:   env.Line,
-		Col:    env.Col,
+		Pos:    env.Pos,
 	})
 }
 

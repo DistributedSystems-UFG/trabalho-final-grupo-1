@@ -1,22 +1,75 @@
 package hub
 
-// transform adjusts op assuming it was created against a document
-// that is `delta` versions behind the current server version.
-// This is a simplified positional transform (no buffered op history).
-// A full OT engine would store all server ops and compose transforms.
-func transform(op *Op, delta int) *Op {
-	if delta <= 0 || op == nil {
+// transformLow transforms op (lower priority) against against.
+// On equal-position insert/insert, op is shifted right (against wins).
+// Returns nil if op becomes a no-op (concurrent delete on same position).
+func transformLow(op, against *Op) *Op {
+	return itransform(op, against, false)
+}
+
+// transformHigh transforms op (higher priority) against against.
+// On equal-position insert/insert, op stays (op wins).
+// Returns nil if op becomes a no-op.
+func transformHigh(op, against *Op) *Op {
+	return itransform(op, against, true)
+}
+
+// itransform is the Inclusion Transformation core.
+// opWins controls tie-breaking on equal-position insert/insert.
+func itransform(op, against *Op, opWins bool) *Op {
+	if op == nil || against == nil {
 		return op
 	}
-	// Without the actual intervening ops we can't do precise transforms.
-	// We return the op as-is; the server is the authority on ordering.
-	// TODO: buffer server ops and apply proper IT/ET transforms.
 	result := *op
+
+	switch {
+	case op.Type == "insert" && against.Type == "insert":
+		if op.Pos > against.Pos {
+			result.Pos++
+		} else if op.Pos == against.Pos && !opWins {
+			result.Pos++
+		}
+
+	case op.Type == "insert" && against.Type == "delete":
+		if op.Pos > against.Pos {
+			result.Pos--
+		}
+
+	case op.Type == "delete" && against.Type == "insert":
+		if op.Pos >= against.Pos {
+			result.Pos++
+		}
+
+	case op.Type == "delete" && against.Type == "delete":
+		if op.Pos > against.Pos {
+			result.Pos--
+		} else if op.Pos == against.Pos {
+			return nil // position already deleted by concurrent op
+		}
+	}
+
 	return &result
 }
 
-// apply mutates content by applying op and returns the new string.
+// transformSince transforms a client op against every server op from clientVersion onward.
+// serverOps[i] is the op that produced server version i+1.
+// The client op has lower priority (server ops win on tie).
+func transformSince(op *Op, serverOps []Op, clientVersion int) *Op {
+	for i := clientVersion; i < len(serverOps); i++ {
+		against := serverOps[i]
+		op = transformLow(op, &against)
+		if op == nil {
+			return nil
+		}
+	}
+	return op
+}
+
+// apply returns content with op applied.
 func apply(content string, op *Op) string {
+	if op == nil {
+		return content
+	}
 	runes := []rune(content)
 	pos := clamp(op.Pos, 0, len(runes))
 

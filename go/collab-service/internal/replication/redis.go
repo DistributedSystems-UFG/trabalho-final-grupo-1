@@ -114,6 +114,24 @@ func (b *RedisBus) PublishCommit(ctx context.Context, commit Commit) error {
 	})
 }
 
+// PublishResyncRequest asks the leader to resend the full document state.
+// The message travels via the proposals channel so only the leader processes it.
+func (b *RedisBus) PublishResyncRequest(ctx context.Context, req ResyncRequest) error {
+	return b.publish(ctx, proposalChannel(req.DocID), Message{
+		Kind:          MessageKindResyncRequest,
+		ResyncRequest: &req,
+	})
+}
+
+// PublishResyncResponse broadcasts the authoritative document state to all nodes.
+// The message travels via the commits channel so every subscribed Hub receives it.
+func (b *RedisBus) PublishResyncResponse(ctx context.Context, resp ResyncResponse) error {
+	return b.publish(ctx, commitChannel(resp.DocID), Message{
+		Kind:           MessageKindResyncResponse,
+		ResyncResponse: &resp,
+	})
+}
+
 // TryAcquireLeadership attempts to become the single writer for a document.
 func (b *RedisBus) TryAcquireLeadership(ctx context.Context, docID string, ttl time.Duration) (bool, error) {
 	ok, err := b.client.SetNX(ctx, leaderKey(docID), b.nodeID, ttl).Result()
