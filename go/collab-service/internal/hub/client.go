@@ -2,6 +2,8 @@ package hub
 
 import (
 	"log"
+	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -14,11 +16,14 @@ const (
 	maxMessageSize = 8192
 )
 
+var nextClientID atomic.Uint64
+
 // Client represents one WebSocket connection inside a Hub.
 type Client struct {
 	hub    *Hub
 	conn   *websocket.Conn
 	send   chan []byte
+	id     string
 	userID string
 	name   string
 }
@@ -29,6 +34,7 @@ func RegisterClient(h *Hub, conn *websocket.Conn, userID, name string) {
 		hub:    h,
 		conn:   conn,
 		send:   make(chan []byte, 256),
+		id:     strconv.FormatUint(nextClientID.Add(1), 10),
 		userID: userID,
 		name:   name,
 	}

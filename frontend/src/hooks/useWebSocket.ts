@@ -22,6 +22,8 @@ interface Options {
   onMessage: (msg: ServerMsg) => void
 }
 
+const RECONNECT_MS = 1_000
+
 // ── Inclusion Transformation ──────────────────────────────────────────────────
 //
 // opWins controls tie-breaking on equal-position insert/insert.
@@ -67,69 +69,102 @@ export function useWebSocket(docId: string, options: Options) {
   const [connected, setConnected] = useState(false)
 
   useEffect(() => {
-    const ws = new WebSocket(wsUrl(docId))
-    wsRef.current = ws
+    let stopped = false
+    let retry: number | undefined
 
-    ws.onopen  = () => setConnected(true)
-    ws.onclose = () => setConnected(false)
-    ws.onerror = (e) => console.error('[ws] error', e)
+    serverVersionRef.current = 0
+    pendingRef.current = []
+    setConnected(false)
 
-    ws.onmessage = ({ data }) => {
-      try {
-        const msg: ServerMsg = JSON.parse(data)
-        console.debug('[ws] recv', msg.type, msg)
+    function connect() {
+      if (stopped) return
 
-        if (msg.type === 'resync') {
-          serverVersionRef.current = msg.serverVersion
-          pendingRef.current = []
+      const ws = new WebSocket(wsUrl(docId))
+      wsRef.current = ws
+
+      ws.onopen = () => {
+        if (!stopped && wsRef.current === ws) setConnected(true)
+      }
+
+      ws.onclose = () => {
+        if (wsRef.current === ws) {
+          wsRef.current = null
+          setConnected(false)
+        }
+        if (!stopped) {
+          retry = window.setTimeout(connect, RECONNECT_MS)
+        }
+      }
+
+      ws.onerror = (e) => console.error('[ws] error', e)
+
+      ws.onmessage = ({ data }) => {
+        if (stopped || wsRef.current !== ws) return
+        try {
+          const msg: ServerMsg = JSON.parse(data)
+          console.debug('[ws] recv', msg.type, msg)
+
+          if (msg.type === 'resync') {
+            serverVersionRef.current = msg.serverVersion
+            pendingRef.current = []
+            optionsRef.current.onMessage(msg)
+            return
+          }
+
+          if (msg.type === 'ack') {
+            serverVersionRef.current = msg.serverVersion
+            if (pendingRef.current.length > 0) {
+              pendingRef.current.shift()
+            }
+            return
+          }
+
+          if (msg.type === 'op') {
+            serverVersionRef.current = msg.serverVersion
+            const remoteOp = msg.op
+
+            // 1. Transform the incoming server op against all pending client ops
+            //    so it lands in the right position relative to our local state.
+            let transformed: Op | null = { ...remoteOp }
+            for (const p of pendingRef.current) {
+              if (!transformed) break
+              transformed = transformServerOp(transformed, p.op)
+            }
+
+            // 2. Transform each pending client op against the (original) server op
+            //    so they stay correct relative to the server's new state.
+            const updated: PendingOp[] = []
+            for (const p of pendingRef.current) {
+              const newOp = transformClientOp(p.op, remoteOp)
+              if (newOp) updated.push({ op: newOp })
+            }
+            pendingRef.current = updated
+
+            if (transformed) {
+              optionsRef.current.onMessage({ ...msg, op: transformed })
+            }
+            return
+          }
+
           optionsRef.current.onMessage(msg)
-          return
+        } catch {
+          console.warn('[ws] malformed message', data)
         }
-
-        if (msg.type === 'ack') {
-          serverVersionRef.current = msg.serverVersion
-          if (pendingRef.current.length > 0) {
-            pendingRef.current.shift()
-          }
-          return
-        }
-
-        if (msg.type === 'op') {
-          serverVersionRef.current = msg.serverVersion
-          const remoteOp = msg.op
-
-          // 1. Transform the incoming server op against all pending client ops
-          //    so it lands in the right position relative to our local state.
-          let transformed: Op | null = { ...remoteOp }
-          for (const p of pendingRef.current) {
-            if (!transformed) break
-            transformed = transformServerOp(transformed, p.op)
-          }
-
-          // 2. Transform each pending client op against the (original) server op
-          //    so they stay correct relative to the server's new state.
-          const updated: PendingOp[] = []
-          for (const p of pendingRef.current) {
-            const newOp = transformClientOp(p.op, remoteOp)
-            if (newOp) updated.push({ op: newOp })
-          }
-          pendingRef.current = updated
-
-          if (transformed) {
-            optionsRef.current.onMessage({ ...msg, op: transformed })
-          }
-          return
-        }
-
-        optionsRef.current.onMessage(msg)
-      } catch {
-        console.warn('[ws] malformed message', data)
       }
     }
 
+    connect()
+
     return () => {
-      ws.onopen = ws.onclose = ws.onerror = ws.onmessage = null
-      ws.close()
+      stopped = true
+      if (retry !== undefined) window.clearTimeout(retry)
+      const ws = wsRef.current
+      wsRef.current = null
+      setConnected(false)
+      if (ws) {
+        ws.onopen = ws.onclose = ws.onerror = ws.onmessage = null
+        ws.close()
+      }
     }
   }, [docId])
 
