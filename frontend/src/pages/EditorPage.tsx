@@ -38,7 +38,7 @@ export default function EditorPage() {
     contentRef.current = ''
     setDocTitle('Carregando...')
     setUsers([])
-    setMetrics(null)
+    setAnalytics(null)
 
     api.getDocument(docId)
       .then(doc => {

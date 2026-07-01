@@ -30,3 +30,10 @@ frontend/.env.local
 .codex
 .claude
 .ai
+
+# Terraform (infra/aws)
+infra/aws/terraform/.terraform/
+infra/aws/terraform/terraform.tfstate
+infra/aws/terraform/terraform.tfstate.backup
+infra/aws/terraform/*.tfvars
+infra/aws/terraform/*.pem
