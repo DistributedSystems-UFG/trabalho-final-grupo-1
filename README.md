@@ -2,6 +2,8 @@
 
 # CollabDocs
 
+Grupo 1: Caio Castro Miranda, Jaime Silva e João Pedro de Brito Tomé
+
 Editor de documentos colaborativo em tempo real. Múltiplos usuários podem editar o mesmo documento simultaneamente e ver as alterações do outro em tempo real.
 
 Projeto desenvolvido para a disciplina **Sistemas Concorrentes e Distribuídos — UFG 2026.1**.
